@@ -1,0 +1,515 @@
+---
+id: getting-started-agents
+title: AI Agent Evaluation Quickstart
+sidebar_label: AI Agents
+---
+
+import { ASSETS } from "@site/src/assets";
+
+Learn how to evaluate AI Agents using `deepeval`, including multi-agent systems and tool-using agents.
+
+## Overview
+
+AI agent evaluation is different from other types of evals because agentic workflows are complex and **consist of multiple interacting components**, such as tools, chained LLM calls, and RAG modules. Therefore, it’s important to evaluate your AI agents both end-to-end and at the component level to understand how each part performs.
+
+**In this 5 min quickstart, you'll learn how to:**
+
+- Evaluate your agent end-to-end in CI/CD
+- Evaluate individual components, inculding sub-agents, in your agent
+
+## How It Works
+
+Agent evals in `deepeval` are powered by **tracing**:
+
+1. **Instrument your agent once** — with `@observe` or a [framework integration](/integrations/frameworks/openai).
+2. **Every run emits a trace** — with a span per component: LLM calls, tools, retrievers, sub-agents.
+3. **Attach metrics where you want evals** — the trace for end-to-end, individual spans for component-level.
+
+<ImageDisplayer src={ASSETS.componentLevelEvals} alt="component level evals" />
+
+Test cases are built from traces automatically, and everything in this quickstart — CI/CD, `evals_iterator()`, sub-agents — runs on this one setup.
+
+## Installation
+
+```bash
+pip install -U deepeval[inspect]
+```
+
+<details>
+
+<summary>Do I need the `[inspect]` sub-module?</summary>
+
+The `[inspect]` sub-module is optional and can bloat up `deepeval`'s package size so we highly recommend that you don't install `deepeval` with `[inspect]` outside of dev environments.
+
+</details>
+
+You should also run `deepeval login`:
+
+```bash
+deepeval login
+```
+
+It connects you to [Confident AI](https://www.confident-ai.com/) so you can store results, annotate, and inspect evaluated agent traces on the cloud.
+
+:::info
+As you'll see in the final [next steps](#next-steps) section, Confident AI also lets you monitor and inspect your agent's traces in production — and run online evals on them as they come in.
+
+<VideoDisplayer
+  src={ASSETS.tracingTraces}
+  confidentUrl="/docs/llm-tracing/introduction"
+  label="Agent traces in production"
+  description="See every agent execution as a full trace of LLM, tool, and retriever calls."
+/>
+:::
+
+## Unit Test Agents in CI/CD
+
+The fastest way to start evaluating your agent is to unit test it. `deepeval` plugs into `pytest` via `assert_test()` and the `deepeval test run` command, so your agent evals run like any other test suite — locally in development, and on every push or PR.
+
+<Steps>
+<Step>
+
+### Create a dataset
+
+[Datasets](/docs/evaluation-datasets) in `deepeval` store [`Golden`s](/docs/evaluation-datasets#what-are-goldens) — the inputs you'll invoke your agent with at test time:
+
+<Tabs items={["In Code", "Pull from Confident AI", "Load from CSV", "Load from JSON"]}>
+<Tab value="In Code">
+
+```python
+from deepeval.dataset import Golden, EvaluationDataset
+
+goldens = [
+    Golden(input="What is your name?"),
+    Golden(input="Choose a number between 1 and 100"),
+    # ...
+]
+
+dataset = EvaluationDataset(goldens=goldens)
+```
+
+</Tab>
+<Tab value="Pull from Confident AI">
+
+```python
+from deepeval.dataset import EvaluationDataset
+
+dataset = EvaluationDataset()
+dataset.pull(alias="My Evals Dataset")
+```
+
+</Tab>
+<Tab value="Load from CSV">
+
+```python
+from deepeval.dataset import EvaluationDataset
+
+dataset = EvaluationDataset()
+dataset.add_goldens_from_csv_file(
+    file_path="example.csv",
+    input_col_name="query",
+)
+```
+
+</Tab>
+<Tab value="Load from JSON">
+
+```python
+from deepeval.dataset import EvaluationDataset
+
+dataset = EvaluationDataset()
+dataset.add_goldens_from_json_file(
+    file_path="example.json",
+    input_key_name="query",
+)
+```
+
+</Tab>
+</Tabs>
+
+</Step>
+<Step>
+
+### Write your test file
+
+Instrument your agent based on your tech stack, then parametrize a `pytest` test over your goldens and call `assert_test()`. Since your agent is traced, `deepeval` builds each test case automatically — no manual extraction of inputs and outputs:
+
+<include cwd>snippets/evaluation/cicd-agent-framework-tabs.mdx</include>
+
+There are **ONE** mandatory and **ONE** optional parameter for `assert_test()` in this mode:
+
+- `golden`: the `Golden` you pass in through your test function.
+- [Optional] `metrics`: a list of `BaseMetric`s that you wish to run on your trace (aka. end-to-end evals).
+
+:::tip[Unit test individual components too]
+Since your agent is already instrumented, you can attach metrics directly to individual spans — tool calls, sub-agents, retrievers — and `assert_test()` only needs the active golden:
+
+```python title="test_my_ai_agent.py"
+import pytest
+from deepeval import assert_test
+from deepeval.dataset import Golden
+from your_app import my_ai_agent  # traced; spans carry metrics
+
+@pytest.mark.parametrize("golden", dataset.goldens)
+def test_my_ai_agent(golden: Golden):
+    my_ai_agent(golden.input)
+    assert_test(golden=golden)
+```
+
+See [component-level evaluation](/docs/evaluation-component-level-llm-evals) for the per-integration metric attachment surface.
+:::
+
+</Step>
+<Step>
+
+### Run with `deepeval test run`
+
+```bash
+deepeval test run test_llm_app.py
+```
+
+:::caution
+The plain `pytest` command works but is highly not recommended. `deepeval test run` adds a range of functionalities on top of Pytest for unit-testing LLMs, enabled by [8+ optional flags](/docs/evaluation-flags-and-configs#flags-for-deepeval-test-run) — async behavior, error handling, repeats, identifiers, and more.
+:::
+
+Every test run is also saved locally. Run `deepeval inspect` to view your agent's full execution trace — per-span scores and metric reasons included — right in your terminal:
+
+```bash
+deepeval inspect
+```
+
+<ImageDisplayer
+  src={ASSETS.deepevalTuiInspect}
+  alt="deepeval inspect TUI showing a trace tree with per-span scores and metric reasons"
+/>
+
+This is what the `[inspect]` sub-module you installed earlier is for — full details in the [`deepeval inspect` reference](/docs/command-line-interface#inspect).
+
+</Step>
+<Step>
+
+### Add it to your CI/CD pipeline
+
+Drop `deepeval test run` into a `.yml` to unit test your agent on every push or PR. This example uses `poetry` for installation and `OPENAI_API_KEY` as your LLM judge to run evals locally. Add `CONFIDENT_API_KEY` to send results to Confident AI.
+
+```yaml {32-33}
+name: AI Agent `deepeval` Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Dependencies
+        run: poetry install --no-root
+
+      - name: Run `deepeval` Unit Tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONFIDENT_API_KEY: ${{ secrets.CONFIDENT_API_KEY }}
+        run: poetry run deepeval test run test_llm_app.py
+```
+
+✅ Done. Failing metrics now fail the build, so agent regressions get caught before they ship.
+
+</Step>
+</Steps>
+
+## Evaluate Agents with `evals_iterator()`
+
+Unit testing is built for CI/CD, but during development you'll usually iterate on your agent in a script or notebook. `dataset.evals_iterator()` does this in a plain `for` loop — it yields each golden, builds a test case from the captured trace, scores your metrics, and bundles traces + scores into one test run.
+
+<Steps>
+<Step>
+
+### Reuse your dataset
+
+`evals_iterator()` works off the same `EvaluationDataset` of goldens you created [earlier](#create-a-dataset):
+
+```python
+from deepeval.dataset import Golden, EvaluationDataset
+
+goldens = [
+    Golden(input="What is your name?"),
+    Golden(input="Choose a number between 1 and 100"),
+    # ...
+]
+
+dataset = EvaluationDataset(goldens=goldens)
+```
+
+</Step>
+<Step>
+
+### Trace your agent and run the loop
+
+Pick your tech stack below and loop with `evals_iterator(metrics=[...])` — each captured trace gets scored as one end-to-end test case.
+
+Every integration comes in an **Async** and a **Sync** flavor:
+
+- **Async** (default, fastest): wrap each invocation in `asyncio.create_task(...)` + `dataset.evaluate(task)` so goldens run concurrently.
+- **Sync**: pass `AsyncConfig(run_async=False)` to run one golden at a time — handy for debugging, rate-limited providers, or Jupyter event-loop quirks.
+
+<include cwd>snippets/evaluation/end-to-end-agent-framework-tabs.mdx</include>
+
+✅ Done. The `metrics` you pass to `evals_iterator()` score each trace end-to-end; for its five other optional arguments, see the [single-turn end-to-end guide](/docs/evaluation-end-to-end-single-turn#approach-1-evals_iterator-with-tracing-recommended).
+
+Like `deepeval test run`, every `evals_iterator()` run is saved locally — view the full execution trace in the same trace-tree TUI:
+
+```bash
+deepeval inspect
+```
+
+</Step>
+</Steps>
+
+## Evaluate Sub-Agents
+
+In multi-agent systems, every sub-agent invocation — a delegation, handoff, or nested call — emits its own **agent span** inside the trace. To evaluate a sub-agent in isolation, attach metrics to its agent span instead of the trace.
+
+:::note
+Only integrations that emit agent spans are shown below. The OpenAI and Anthropic clients don't — they produce LLM spans only, which you can target with `LlmSpanContext` instead. See [component-level evaluation](/docs/evaluation-component-level-llm-evals).
+:::
+
+<Tabs items={["Manual Instrumentation", "LangChain", "LangGraph", "Pydantic AI", "AgentCore", "Strands", "LlamaIndex", "OpenAI Agents", "Google ADK", "CrewAI"]}>
+<Tab value="Manual Instrumentation">
+
+Mark your sub-agent with `@observe(type="agent")` and pass `metrics=[...]` to it:
+
+```python title="main.py" showLineNumbers
+from deepeval.tracing import observe, update_current_trace
+from deepeval.metrics import TaskCompletionMetric
+...
+
+@observe()
+def supervisor_agent(query: str) -> str:
+    research = research_agent(query)
+    answer = "..."  # synthesize final answer here
+    update_current_trace(input=query, output=answer)
+    return answer
+
+@observe(type="agent", metrics=[TaskCompletionMetric()])
+def research_agent(query: str) -> str:
+    return "..."  # your sub-agent implementation
+```
+
+</Tab>
+<Tab value="LangChain">
+
+Stage a metric for the next agent span with `next_agent_span(...)` — the `CallbackHandler` drains it onto the next agent span opened during the run:
+
+```python title="langchain_app.py" showLineNumbers
+from deepeval.tracing import next_agent_span
+from deepeval.integrations.langchain import CallbackHandler
+from deepeval.metrics import TaskCompletionMetric
+...
+
+def run_agent(prompt: str):
+    with next_agent_span(metrics=[TaskCompletionMetric()]):
+        return agent.invoke(
+            {"messages": [{"role": "user", "content": prompt}]},
+            config={"callbacks": [CallbackHandler()]},
+        )
+```
+
+Like `next_llm_span`, this is one-shot — only the first agent span in the run picks up the metric.
+
+</Tab>
+<Tab value="LangGraph">
+
+Stage a metric for the next agent span with `next_agent_span(...)` — the `CallbackHandler` drains it onto the next agent span opened during the graph run (e.g. a sub-agent node or subgraph):
+
+```python title="langgraph_app.py" showLineNumbers
+from deepeval.tracing import next_agent_span
+from deepeval.integrations.langchain import CallbackHandler
+from deepeval.metrics import TaskCompletionMetric
+...
+
+def run_graph(prompt: str):
+    with next_agent_span(metrics=[TaskCompletionMetric()]):
+        return graph.invoke(
+            {"messages": [{"role": "user", "content": prompt}]},
+            config={"callbacks": [CallbackHandler()]},
+        )
+```
+
+Like `next_llm_span`, this is one-shot — only the first agent span in the graph run picks up the metric.
+
+</Tab>
+<Tab value="Pydantic AI">
+
+Stage a metric for the next agent span with `next_agent_span(...)` — delegations and handoffs nest as their own agent spans:
+
+```python title="pydanticai_agent.py" showLineNumbers
+from deepeval.tracing import next_agent_span
+from deepeval.metrics import TaskCompletionMetric
+...
+
+async def run_agent(prompt: str):
+    with next_agent_span(metrics=[TaskCompletionMetric()]):
+        return await agent.run(prompt)
+```
+
+</Tab>
+<Tab value="AgentCore">
+
+Stage a metric for the next agent span with `next_agent_span(...)`:
+
+```python title="agentcore_agent.py" showLineNumbers
+from deepeval.tracing import next_agent_span
+from deepeval.metrics import TaskCompletionMetric
+...
+
+def run_agent(prompt: str):
+    with next_agent_span(metrics=[TaskCompletionMetric()]):
+        return invoke({"prompt": prompt})
+```
+
+</Tab>
+<Tab value="Strands">
+
+Stage a metric for the next agent span with `next_agent_span(...)`:
+
+```python title="strands_agent.py" showLineNumbers
+from deepeval.metrics import TaskCompletionMetric
+from deepeval.tracing import next_agent_span
+...
+
+def run_agent(prompt: str):
+    with next_agent_span(metrics=[TaskCompletionMetric()]):
+        return agent(prompt)
+```
+
+</Tab>
+<Tab value="LlamaIndex">
+
+Stage a metric for the agent span with `AgentSpanContext(metrics=[...])` inside `with trace(...)`:
+
+```python title="llamaindex_agent.py" showLineNumbers
+from deepeval.tracing import trace, AgentSpanContext
+from deepeval.metrics import TaskCompletionMetric
+...
+
+async def run_agent(prompt: str):
+    with trace(agent_span_context=AgentSpanContext(metrics=[TaskCompletionMetric()])):
+        return await agent.run(prompt)
+```
+
+</Tab>
+<Tab value="OpenAI Agents">
+
+Attach `agent_metrics=[...]` to the sub-agent's `Agent` shim — it scores that agent's span on every run, including when it's reached through a handoff:
+
+```python title="openai_agents_app.py" showLineNumbers
+from deepeval.openai_agents import Agent
+from deepeval.metrics import TaskCompletionMetric, AnswerRelevancyMetric
+...
+
+triage_agent = Agent(
+    name="triage",
+    instructions="Route the question to the right specialist.",
+    handoffs=[
+        Agent(
+            name="weather_specialist",
+            instructions="Answer weather questions.",
+            tools=[get_weather],
+            agent_metrics=[TaskCompletionMetric()],
+        ),
+    ],
+    agent_metrics=[AnswerRelevancyMetric()],
+)
+```
+
+</Tab>
+<Tab value="Google ADK">
+
+Stage a metric for the next agent span with `next_agent_span(...)`:
+
+```python title="google_adk_agent.py" showLineNumbers
+from deepeval.tracing import next_agent_span
+from deepeval.metrics import TaskCompletionMetric
+...
+
+async def run_agent_with_metric(prompt: str):
+    with next_agent_span(metrics=[TaskCompletionMetric()]):
+        return await run_agent(prompt)
+```
+
+</Tab>
+<Tab value="CrewAI">
+
+Attach `metrics=[...]` to the specific `Agent` shim — it scores that agent's span on every execution, independent of the rest of the crew:
+
+```python title="crewai_app.py" showLineNumbers
+from deepeval.integrations.crewai import Agent
+from deepeval.metrics import TaskCompletionMetric
+...
+
+reporter = Agent(
+    role="Weather Reporter",
+    goal="Provide accurate weather information.",
+    backstory="An experienced meteorologist.",
+    tools=[get_weather],
+    metrics=[TaskCompletionMetric()],
+)
+```
+
+</Tab>
+</Tabs>
+
+Then run your evals exactly as before — [`evals_iterator()`](#evaluate-agents-with-evals_iterator) in scripts, or [`assert_test(golden=golden)`](#unit-test-agents-in-cicd) in CI/CD. Trace-level metrics are optional here since the metrics already live on the sub-agent spans.
+
+## Next Steps
+
+Now that you have run your first agentic evals, you should:
+
+1. **Customize your metrics**: Update the [list of metrics](/docs/metrics-introduction) for each component.
+2. **Customize tracing**: It helps benchmark and identify different components on the UI.
+3. **Explore the integration docs**: Each [framework integration](/integrations/frameworks/openai) has its own page with end-to-end and component-level patterns.
+
+You'll be able to analyze performance over time on **traces** (end-to-end) and **spans** (component-level).
+
+<Tabs items={["End-to-end (traces) in prod", "Component-level (spans) in prod"]}>
+<Tab value="End-to-end (traces) in prod">
+
+Evals on traces are [end-to-end evaluations](/docs/evaluation-end-to-end-llm-evals), where a single LLM interaction is being evaluated.
+
+<VideoDisplayer
+  src={ASSETS.tracingTraces}
+  confidentUrl="/docs/llm-tracing/introduction"
+  label="Trace-level evals in production"
+  description="Score entire agent executions end-to-end on live traffic."
+/>
+
+</Tab>
+<Tab value="Component-level (spans) in prod">
+
+Spans make up a trace and evals on spans represents [component-level evaluations](/docs/evaluation-component-level-llm-evals), where individual components in your LLM app are being evaluated.
+
+<VideoDisplayer
+  src={ASSETS.tracingSpans}
+  confidentUrl="/docs/llm-tracing/introduction"
+  label="Span-level evals in production"
+  description="Evaluate individual components like tool calls and retrievals inside each trace."
+/>
+
+</Tab>
+</Tabs>

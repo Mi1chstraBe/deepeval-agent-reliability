@@ -1,0 +1,499 @@
+---
+id: evaluation-unit-testing-in-ci-cd
+title: Unit Testing in CI/CD
+sidebar_label: Unit Testing in CI/CD
+---
+
+import { ASSETS } from "@site/src/assets";
+
+Integrate LLM evaluations into your CI/CD pipeline with `deepeval` to catch regressions before they ship. `deepeval` plugs into `pytest` via `assert_test()` and the `deepeval test run` command, so every push (or every PR) runs the same evals you'd run locally — single-turn or multi-turn, end-to-end or component-level.
+
+## How It Works
+
+Unit testing in CI/CD is the same three steps regardless of which flavor of evaluation you're running:
+
+1. **Load your dataset** — pull goldens from Confident AI, a CSV, or a JSON file. This step is identical for every flavor.
+2. **Construct test cases & write your test** — this is where the flavor matters. End-to-end vs component-level, single-turn vs multi-turn, and (for single-turn) instrumented vs un-instrumented all change what you put inside the `pytest` test.
+3. **Run with `deepeval test run`** — same command for every flavor. Drops into a `.yml` file unchanged.
+
+`deepeval`'s `pytest` integration allows you to leverage all of `pytest` flags and functionalities, as well as capabilities offered by `deepeval`, which you can learn more about below.
+
+:::tip
+If you haven't already, we recommend reading the end-to-end and component-level guides first to understand what we're doing — `deepeval`'s `pytest` integration mirrors those workflows, just inside a `pytest` test file:
+
+- [Single-turn end-to-end evals](/docs/evaluation-end-to-end-single-turn)
+- [Multi-turn end-to-end evals](/docs/evaluation-end-to-end-multi-turn)
+- [Component-level evals](/docs/evaluation-component-level-llm-evals) (single-turn only)
+  :::
+
+## Step-by-Step Guide
+
+<Steps>
+<Step>
+
+### Load your dataset
+
+`deepeval` loads datasets from Confident AI, a CSV, a JSON file, or directly in code into an `EvaluationDataset`.
+
+<Tabs items={["Pull from Confident AI", "Load from CSV", "Load from JSON", "In Code"]}>
+<Tab value="Pull from Confident AI">
+
+```python
+from deepeval.dataset import EvaluationDataset
+
+dataset = EvaluationDataset()
+dataset.pull(alias="My Evals Dataset")
+```
+
+</Tab>
+<Tab value="Load from CSV">
+
+```python
+from deepeval.dataset import EvaluationDataset
+
+dataset = EvaluationDataset()
+dataset.add_goldens_from_csv_file(
+    file_path="example.csv",
+    input_col_name="query",
+)
+```
+
+</Tab>
+<Tab value="Load from JSON">
+
+```python
+from deepeval.dataset import EvaluationDataset
+
+dataset = EvaluationDataset()
+dataset.add_goldens_from_json_file(
+    file_path="example.json",
+    input_key_name="query",
+)
+```
+
+</Tab>
+<Tab value="In Code">
+
+```python
+from deepeval.dataset import Golden, EvaluationDataset
+
+goldens = [
+    Golden(input="What is your name?"),
+    Golden(input="Choose a number between 1 and 100"),
+    # ...
+]
+
+dataset = EvaluationDataset(goldens=goldens)
+```
+
+</Tab>
+</Tabs>
+
+:::info[Multi-turn datasets]
+For [multi-turn](/docs/evaluation-end-to-end-multi-turn) evals, use `ConversationalGolden` instead of `Golden`. See [the datasets page](/docs/evaluation-datasets#load-dataset) for the full surface.
+:::
+
+</Step>
+
+<Step>
+### Construct test cases
+
+Pick the flavor that matches your application — [single-turn](/docs/evaluation-end-to-end-single-turn) (one input → one output) or [multi-turn](/docs/evaluation-end-to-end-multi-turn) (whole conversations).
+
+<Tabs items={["Single-Turn", "Multi-Turn"]}>
+
+<Tab value="Single-Turn">
+
+Within single-turn, we strongly recommend **instrumenting your app with tracing** so `deepeval` can build the `LLMTestCase` automatically from each run, and you get a full per-test-case trace on Confident AI for free.
+
+The same setup also unlocks [component-level evaluation](/docs/evaluation-component-level-llm-evals), where metrics live on individual spans (retrievers, tool calls, sub-agents) instead of the trace as a whole.
+
+**Instrument/Trace with Evals**
+
+Each example below is a complete `deepeval test run` file with instrumentation:
+
+<include cwd>snippets/evaluation/cicd-agent-framework-tabs.mdx</include>
+
+There are **ONE** mandatory and **ONE** optional parameter for `assert_test()` in this mode:
+
+- `golden`: the `Golden` you pass in through your test function.
+- [Optional] `metrics`: a list of `BaseMetric`s that you wish to run on your trace (aka. end-to-end evals).
+
+:::tip[Going component-level]
+Once your app is instrumented, you can attach metrics directly to individual `@observe`'d (or framework-emitted) spans to grade internal components — retrievers, tool calls, sub-agents — alongside the end-to-end trace.
+
+See [component-level evaluation](/docs/evaluation-component-level-llm-evals) for the per-integration metric attachment surface; trace-level and span-level metrics coexist in the same test run.
+:::
+
+**Without Tracing**
+
+Use this when you can't (or don't want to) instrument your app — e.g. a QA engineer evaluating a deployed black-box system. You build the `LLMTestCase` yourself inside the test and hand it to `assert_test()` directly. No tracing is involved, so you don't get per-test-case traces in CI.
+
+```python title="test_llm_app.py" showLineNumbers
+import pytest
+from deepeval import assert_test
+from deepeval.dataset import EvaluationDataset, Golden
+from deepeval.test_case import LLMTestCase
+from deepeval.metrics import AnswerRelevancyMetric
+
+def your_llm_app(query: str) -> str:
+    return "Pi rounded to 2 decimal places is 3.14."
+
+dataset = EvaluationDataset(goldens=[Golden(input="What is pi rounded to 2 decimal places?")])
+
+@pytest.mark.parametrize("golden", dataset.goldens)
+def test_llm_app(golden: Golden):
+    answer = your_llm_app(golden.input)
+    test_case = LLMTestCase(
+        input=golden.input,
+        actual_output=answer,
+    )
+    assert_test(test_case=test_case, metrics=[AnswerRelevancyMetric()])
+```
+
+There are **TWO** mandatory and **ONE** optional parameter for `assert_test()` in this mode:
+
+- `test_case`: an `LLMTestCase` you constructed inside the test.
+- `metrics`: a list of `BaseMetric`s.
+
+The fields you populate on `LLMTestCase` must match what your metrics need (e.g. `FaithfulnessMetric` requires `retrieval_context`). See [test cases](/docs/evaluation-test-cases#llm-test-cases) for the full parameter list.
+
+</Tab>
+
+<Tab value="Multi-Turn">
+
+Pick this if your app is multi-turn — chatbots, support agents, and any conversational app where the unit of evaluation is the whole conversation rather than a single exchange. You wrap your chatbot in a `model_callback`, simulate conversations against goldens, then `assert_test()` each `ConversationalTestCase`. Multi-turn evaluation is end-to-end by default; for the full standalone walkthrough see the [multi-turn end-to-end guide](/docs/evaluation-end-to-end-multi-turn).
+
+**1. Wrap your chatbot in a callback**
+
+The `ConversationSimulator` needs a way to ask your chatbot for its next reply, given the conversation so far:
+
+<Tabs items={["Python", "OpenAI", "LangChain", "LlamaIndex", "OpenAI Agents", "Pydantic"]}>
+<Tab value="Python">
+
+```python title="main.py" showLineNumbers
+from typing import List
+from deepeval.test_case import Turn
+
+async def model_callback(input: str, turns: List[Turn], thread_id: str) -> Turn:
+    response = await your_chatbot(input, turns, thread_id)
+    return Turn(role="assistant", content=response)
+```
+
+</Tab>
+<Tab value="OpenAI">
+
+```python title="main.py" showLineNumbers {6}
+from typing import List
+from deepeval.test_case import Turn
+from openai import OpenAI
+
+client = OpenAI()
+
+async def model_callback(input: str, turns: List[Turn]) -> Turn:
+    messages = [
+        {"role": "system", "content": "You are a ticket purchasing assistant"},
+        *[{"role": t.role, "content": t.content} for t in turns],
+        {"role": "user", "content": input},
+    ]
+    response = await client.chat.completions.create(model="gpt-4.1", messages=messages)
+    return Turn(role="assistant", content=response.choices[0].message.content)
+```
+
+</Tab>
+<Tab value="LangChain">
+
+```python title="main.py" showLineNumbers {10,13}
+from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
+from deepeval.test_case import Turn
+
+agent = create_agent(
+    model="openai:gpt-4o-mini",
+    system_prompt="You are a ticket purchasing assistant.",
+    checkpointer=InMemorySaver(),
+)
+
+async def model_callback(input: str, thread_id: str) -> Turn:
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": input}]},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+    return Turn(role="assistant", content=result["messages"][-1].content)
+```
+
+</Tab>
+<Tab value="LlamaIndex">
+
+```python title="main.py" showLineNumbers {9}
+from llama_index.core.storage.chat_store import SimpleChatStore
+from llama_index.llms.openai import OpenAI
+from llama_index.core.chat_engine import SimpleChatEngine
+from llama_index.core.memory import ChatMemoryBuffer
+from deepeval.test_case import Turn
+
+chat_store = SimpleChatStore()
+llm = OpenAI(model="gpt-4")
+
+async def model_callback(input: str, thread_id: str) -> Turn:
+    memory = ChatMemoryBuffer.from_defaults(chat_store=chat_store, chat_store_key=thread_id)
+    chat_engine = SimpleChatEngine.from_defaults(llm=llm, memory=memory)
+    response = chat_engine.chat(input)
+    return Turn(role="assistant", content=response.response)
+```
+
+</Tab>
+<Tab value="OpenAI Agents">
+
+```python title="main.py" showLineNumbers {6}
+from agents import Agent, Runner, SQLiteSession
+from deepeval.test_case import Turn
+
+sessions = {}
+agent = Agent(name="Test Assistant", instructions="You are a helpful assistant that answers questions concisely.")
+
+async def model_callback(input: str, thread_id: str) -> Turn:
+    if thread_id not in sessions:
+        sessions[thread_id] = SQLiteSession(thread_id)
+    session = sessions[thread_id]
+    result = await Runner.run(agent, input, session=session)
+    return Turn(role="assistant", content=result.final_output)
+```
+
+</Tab>
+<Tab value="Pydantic">
+
+```python title="main.py" showLineNumbers {9}
+from typing import List
+from datetime import datetime
+from pydantic_ai import Agent
+from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
+from deepeval.test_case import Turn
+
+agent = Agent('openai:gpt-4', system_prompt="You are a helpful assistant that answers questions concisely.")
+
+async def model_callback(input: str, turns: List[Turn]) -> Turn:
+    message_history = []
+    for turn in turns:
+        if turn.role == "user":
+            message_history.append(ModelRequest(parts=[UserPromptPart(content=turn.content, timestamp=datetime.now())], kind='request'))
+        elif turn.role == "assistant":
+            message_history.append(ModelResponse(parts=[TextPart(content=turn.content)], model_name='gpt-4', timestamp=datetime.now(), kind='response'))
+    result = await agent.run(input, message_history=message_history)
+    return Turn(role="assistant", content=result.output)
+```
+
+</Tab>
+</Tabs>
+
+:::info
+Your `model_callback` accepts an `input` (the simulated user's next message) and may optionally accept `turns` (the history so far) and `thread_id`. It must return a `Turn(role="assistant", content=...)`.
+:::
+
+**2. Simulate conversations & write your test**
+
+Run the simulator once at module load to produce `ConversationalTestCase`s, then parametrize over them:
+
+```python title="test_chatbot.py" showLineNumbers
+import pytest
+import deepeval
+from deepeval import assert_test
+from deepeval.test_case import ConversationalTestCase
+from deepeval.metrics import TurnRelevancyMetric
+from deepeval.conversation_simulator import ConversationSimulator
+from your_app import model_callback
+
+simulator = ConversationSimulator(model_callback=model_callback)
+test_cases = simulator.simulate(
+    conversational_goldens=dataset.goldens,
+    max_user_simulations=10,
+)
+
+@pytest.mark.parametrize("test_case", test_cases)
+def test_chatbot(test_case: ConversationalTestCase):
+    assert_test(test_case=test_case, metrics=[TurnRelevancyMetric()])
+
+@deepeval.log_hyperparameters
+def hyperparameters():
+    return {"model": "gpt-4.1", "system_prompt": "Be concise."}
+```
+
+There are **TWO** mandatory and **ONE** optional parameter for `assert_test()` in this mode:
+
+- `test_case`: a `ConversationalTestCase` produced by the simulator.
+- `metrics`: a list of `BaseConversationalMetric`s. See [multi-turn metrics](/docs/metrics-introduction#multi-turn-metrics) (`TurnRelevancyMetric`, `KnowledgeRetentionMetric`, `RoleAdherenceMetric`, `ConversationCompletenessMetric`).
+- [Optional] `run_async`: defaults to `True`.
+
+</Tab>
+</Tabs>
+
+</Step>
+
+<Step>
+### Run with `deepeval test run`
+
+Whichever flavor you picked above, the command is the same:
+
+```bash
+deepeval test run test_llm_app.py
+```
+
+:::caution
+The plain `pytest` command works but is highly not recommended. `deepeval test run` adds a range of functionalities on top of Pytest for unit-testing LLMs, enabled by [8+ optional flags](/docs/evaluation-flags-and-configs#flags-for-deepeval-test-run) — async behavior, error handling, repeats, identifiers, and more.
+:::
+
+</Step>
+</Steps>
+
+## YAML File For CI/CD Evals
+
+Drop `deepeval test run` into a `.yml` to run your unit tests on every push or PR. This example uses `poetry` for installation and `OPENAI_API_KEY` as your LLM judge to run evals locally. Add `CONFIDENT_API_KEY` to send results to Confident AI.
+
+```yaml {32-33}
+name: LLM App `deepeval` Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Dependencies
+        run: poetry install --no-root
+
+      - name: Run `deepeval` Unit Tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONFIDENT_API_KEY: ${{ secrets.CONFIDENT_API_KEY }}
+        run: poetry run deepeval test run test_llm_app.py
+```
+
+[Click here](/docs/evaluation-flags-and-configs#flags-for-deepeval-test-run) to learn about the optional flags available to `deepeval test run`.
+
+:::tip
+We highly recommend setting up [Confident AI](https://app.confident-ai.com) with your `deepeval` evaluations to get professional test reports and observe trends of your LLM application's performance over time:
+
+<VideoDisplayer
+  src={ASSETS.tracingSpans}
+  confidentUrl="/docs/llm-tracing/introduction"
+  label="Span-level evals in production"
+  description="Keep evaluating components in production after your CI/CD checks pass."
+/>
+:::
+
+## Marking an Official Run
+
+You can designate a test run as the **official** test run on Confident AI — the marked good run that future runs are compared against for regressions. Add the `--official` flag (or `-o`) to mark the run once it completes:
+
+```bash
+deepeval test run test_llm_app.py --official
+```
+
+If you evaluate with `evaluate()` rather than `deepeval test run`, pass `official=True` instead:
+
+```python
+from deepeval import evaluate
+
+evaluate(test_cases=[...], metrics=[...], official=True)
+```
+
+This is typically done on your main branch so every baseline reflects merged, production-ready code.
+
+:::note
+Marking a run as official requires a `CONFIDENT_API_KEY`, since official runs live on Confident AI.
+:::
+
+## FAQs
+
+<FAQs
+  qas={[
+    {
+      question: "How does `deepeval` fit into CI/CD?",
+      answer: (
+        <>
+          You write your evals as <code>pytest</code> tests using{" "}
+          <code>assert_test()</code> and run them with{" "}
+          <code>deepeval test run</code> as a step in your pipeline. Failing
+          metrics fail the build, so regressions get caught before they ship.
+        </>
+      ),
+    },
+    {
+      question: "What's the difference between `assert_test()` and `evaluate()`?",
+      answer: (
+        <>
+          <code>assert_test()</code> is built for CI/CD and raises an assertion
+          error when a metric falls below its threshold, while{" "}
+          <code>evaluate()</code> is for scripts and notebooks and collects
+          results without failing. Use <code>assert_test()</code> for gating.
+        </>
+      ),
+    },
+    {
+      question: "Do I need a Confident AI account to run evals in CI/CD?",
+      answer: (
+        <>
+          No. Provide an LLM judge key such as <code>OPENAI_API_KEY</code> and
+          your tests run entirely locally. Adding <code>CONFIDENT_API_KEY</code>{" "}
+          is optional and only sends results to the cloud.
+        </>
+      ),
+    },
+    {
+      question: "Which CI providers does this work with?",
+      answer: (
+        <>
+          Any provider that runs a shell step. The docs show a GitHub Actions{" "}
+          <code>.yml</code> using <code>poetry</code>, but the same{" "}
+          <code>deepeval test run</code> command works in GitLab CI, CircleCI,
+          Jenkins, and others.
+        </>
+      ),
+    },
+    {
+      question: "How do I speed up or control test runs in CI?",
+      answer: (
+        <>
+          Use <code>deepeval test run</code> flags like parallelization,
+          caching, and ignore-errors. See{" "}
+          <a href="/docs/evaluation-flags-and-configs#flags-for-deepeval-test-run">
+            flags and configs
+          </a>{" "}
+          for the full list.
+        </>
+      ),
+    },
+    {
+      question:
+        "Can my team see professional test reports on the cloud and track results over time?",
+      answer: (
+        <>
+          Yes — and it's optional. Add <code>CONFIDENT_API_KEY</code> to your CI
+          secrets and the same <code>deepeval test run</code> sends results to{" "}
+          <a href="https://app.confident-ai.com">Confident AI</a> (the platform
+          from the <code>deepeval</code> team), giving your team sharable
+          testing reports, a
+          UI to inspect failing cases, and trend lines of performance across
+          commits. Without the key, the exact same tests still run locally.
+        </>
+      ),
+    },
+  ]}
+/>
