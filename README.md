@@ -101,7 +101,9 @@ pytest tests/test_metrics/test_tool_calling_reliability_metric.py -q
 
 ## 关联项目
 
-本项目的 enhanced benchmark 数据来自接入 [AgentScheduler-Swarm](https://github.com/Mi1chstraBe/swarm-agent-scheduler) 调度层后的结果，两个项目构成完整的“建系统 -> 评估系统”闭环。
+本项目的 Enhanced benchmark 数据来自接入
+[Mi1chstraBe/swarm-agent-scheduler](https://github.com/Mi1chstraBe/swarm-agent-scheduler)
+调度层后的结果，两个项目构成完整的"建系统 → 评估系统"闭环。
 
 ## Original DeepEval Documentation
 
