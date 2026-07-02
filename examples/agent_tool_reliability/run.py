@@ -285,7 +285,8 @@ def report_markdown(baseline: Dict, enhanced: Dict) -> str:
             "## Notes",
             "",
             "- ToolCorrectnessMetric checks whether expected tools and arguments were used.",
-            "- ToolUseMetric is conversational and can use LLM-as-judge behavior.",
+            "- TOOL_TIMEOUT is a root-cause attribution, not necessarily a final task failure; fallback can recover a timed-out primary tool call.",
+            "- Enhanced latency is lower because timeout cutoffs and fallback remove several long-tail baseline failures.",
             "- ToolCallingReliabilityMetric is deterministic and trace-based: it adds timeout, retry, fallback, latency, runtime success, and root-cause attribution signals.",
         ]
     )
@@ -299,7 +300,7 @@ def main() -> None:
     enhanced = summarize(enhanced_rows)
     report = report_markdown(baseline, enhanced)
     output_path = Path(__file__).with_name("report.md")
-    output_path.write_text(report, encoding="utf-8")
+    output_path.write_text(report, encoding="utf-8", newline="\n")
     print(report)
     print("Report written to: examples/agent_tool_reliability/report.md")
 

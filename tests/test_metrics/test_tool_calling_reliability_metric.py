@@ -199,3 +199,35 @@ def test_final_answer_failed_after_tool_success_attribution():
         FailureAttribution.FINAL_ANSWER_FAILED_AFTER_TOOL_SUCCESS
         in metric.result.failure_attributions
     )
+
+
+def test_timeout_root_cause_can_be_recovered_by_fallback():
+    tool = ToolCall(
+        name="search_flights",
+        input_parameters={"from": "Beijing", "to": "Shanghai"},
+    )
+    metric, score = _measure(
+        _case(
+            called_tool=tool,
+            traces=[
+                {
+                    "tool_name": "search_flights",
+                    "status": "fallback_success",
+                    "root_status": "timeout",
+                    "fallback_used": True,
+                    "fallback_tool": "cached_flights",
+                    "latency_ms": 220,
+                }
+            ],
+        )
+    )
+
+    assert score == pytest.approx(1.0)
+    assert metric.result.final_task_success_rate == pytest.approx(1.0)
+    assert metric.result.timeout_rate == pytest.approx(1.0)
+    assert FailureAttribution.TOOL_TIMEOUT in metric.result.failure_attributions
+    assert FailureAttribution.FALLBACK_USED in metric.result.failure_attributions
+    assert (
+        FailureAttribution.FINAL_ANSWER_FAILED_AFTER_TOOL_SUCCESS
+        not in metric.result.failure_attributions
+    )

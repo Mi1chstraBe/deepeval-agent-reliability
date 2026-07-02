@@ -1,3 +1,110 @@
+# AgentEval-DeepEval
+
+基于 DeepEval 扩展的 Agent 工具调用可靠性评测 Pipeline，将 agent 失败从“结果不好”拆解为可定位的工程原因。
+
+## 解决的问题
+
+DeepEval 原有 `ToolCorrectnessMetric` 评估工具选择和参数是否正确，但不覆盖：
+
+- 工具执行的 runtime reliability：`timeout`、`retry`、`fallback`
+- 失败的具体阶段归因：是选错工具、参数错误、执行失败，还是 fallback 也失败了
+- baseline vs enhanced 的系统级对比报告
+
+## 新增能力
+
+### ToolCallingReliabilityMetric
+
+`ToolCallingReliabilityMetric` 是 deterministic metric，不依赖 LLM-as-judge，结果稳定可复现。
+
+统计指标：
+
+- `tool_selection_accuracy`
+- `argument_match_rate`
+- `execution_success_rate`
+- `timeout_rate`
+- `retry_rate`
+- `fallback_rate`
+- `final_task_success_rate`
+
+### 8 类失败归因
+
+- `NO_TOOL_CALLED`
+- `WRONG_TOOL`
+- `WRONG_ARGUMENTS`
+- `TOOL_TIMEOUT`
+- `TOOL_EXECUTION_FAILED`
+- `FALLBACK_USED`
+- `FALLBACK_FAILED`
+- `FINAL_ANSWER_FAILED_AFTER_TOOL_SUCCESS`
+
+注意：`TOOL_TIMEOUT` 记录 root cause（发生了什么），与“最终导致任务失败的 timeout 数量”是两个维度，分开统计才能看清系统真实损失。
+
+## 使用方式
+
+```python
+from deepeval.metrics import ToolCallingReliabilityMetric
+from deepeval.test_case import LLMTestCase, ToolCall
+
+metric = ToolCallingReliabilityMetric()
+
+test_case = LLMTestCase(
+    input="帮我查北京到上海最便宜的航班",
+    actual_output=response.messages[-1]["content"],
+    expected_tools=[
+        ToolCall(
+            name="search_flights",
+            input_parameters={"from": "北京", "to": "上海"},
+        )
+    ],
+    tools_called=response.tools_called,
+    metadata={"tool_traces": response.tool_traces},
+)
+
+metric.measure(test_case)
+print(metric.score)
+print(metric.reason)
+```
+
+## Benchmark 结果
+
+50 组 deterministic mock benchmark，覆盖 no tool、wrong tool、wrong arguments、timeout、execution failed、fallback recovered。
+
+| 指标 | Baseline | Enhanced |
+| --- | ---: | ---: |
+| `task_success_rate` | 68.0% | 92.0% |
+| `tool_execution_success` | 76.0% | 92.0% |
+| `timeout_failures` | 8 | 3 |
+| `fallback_recovered` | 0 | 5 |
+| `avg_latency_ms` | 507 | 483 |
+
+Enhanced 版本为接入 [AgentScheduler-Swarm](https://github.com/Mi1chstraBe/swarm-agent-scheduler) 调度层后的结果。
+
+平均延迟下降的原因：baseline 存在大量等到完整 timeout 才失败的长尾请求，enhanced 的 timeout 截断机制将这些 1000ms 级别的失败请求替换为更短路径的 fallback 成功请求，尾延迟得到控制。
+
+## 与 DeepEval ToolCorrectnessMetric 的区别
+
+| 维度 | `ToolCorrectnessMetric` | `ToolCallingReliabilityMetric` |
+| --- | --- | --- |
+| 评估重点 | 选择和参数正确性 | Runtime reliability |
+| 是否覆盖超时 | 否 | 是 |
+| 是否覆盖重试 | 否 | 是 |
+| 是否覆盖降级 | 否 | 是 |
+| 失败归因 | 否 | 8 类，定位到具体阶段 |
+| judge 方式 | LLM-as-judge | Deterministic 规则 |
+
+## 测试
+
+```bash
+pytest tests/test_metrics/test_tool_calling_reliability_metric.py -q
+# 8 passed
+```
+
+## 关联项目
+
+本项目的 enhanced benchmark 数据来自接入 [AgentScheduler-Swarm](https://github.com/Mi1chstraBe/swarm-agent-scheduler) 调度层后的结果，两个项目构成完整的“建系统 -> 评估系统”闭环。
+
+## Original DeepEval Documentation
+
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: dark)" srcset="assets/hero/wordmark-dark.svg">
@@ -60,22 +167,6 @@
 </p>
 
 
-## My Contribution
-
-This fork adds an Agent Tool-Calling Reliability Evaluation Pipeline to DeepEval:
-
-- Added deterministic `ToolCallingReliabilityMetric`, using `LLMTestCase.expected_tools`, `tools_called`, and `metadata["tool_traces"]` to measure tool selection accuracy, argument match rate, execution success, timeout, retry, fallback, final task success, and latency.
-- Added 8 trace-based failure attributions: `NO_TOOL_CALLED`, `WRONG_TOOL`, `WRONG_ARGUMENTS`, `TOOL_TIMEOUT`, `TOOL_EXECUTION_FAILED`, `FALLBACK_USED`, `FALLBACK_FAILED`, and `FINAL_ANSWER_FAILED_AFTER_TOOL_SUCCESS`.
-- Built a deterministic 50-case benchmark under `examples/agent_tool_reliability/`: task success improved from `68.0%` to `92.0%`, tool execution success from `76.0%` to `92.0%`, timeout failures from `8` to `3`, and fallback recovered `5` cases.
-
-Run the focused evaluation:
-
-```bash
-python examples/agent_tool_reliability/run.py
-pytest tests/test_metrics/test_tool_calling_reliability_metric.py -q
-```
-
-Difference from existing DeepEval metrics: `ToolCorrectnessMetric` focuses on whether the expected tools and arguments were used; `ToolCallingReliabilityMetric` complements it with deterministic runtime reliability, latency, fallback, retry, timeout, and failure-attribution signals.
 
 **DeepEval** is a simple-to-use, open-source LLM evaluation framework, for evaluating large-language model systems. It is similar to Pytest but specialized for unit testing LLM apps. DeepEval incorporates the latest research to run evals via metrics such as G-Eval, task completion, answer relevancy, hallucination, etc., which uses LLM-as-a-judge and other NLP models that run **locally on your machine**.
 

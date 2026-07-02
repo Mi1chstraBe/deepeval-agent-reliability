@@ -27,5 +27,6 @@ Deterministic mock benchmark: 50 paired cases, no LLM/API calls.
 ## Notes
 
 - ToolCorrectnessMetric checks whether expected tools and arguments were used.
-- ToolUseMetric is conversational and can use LLM-as-judge behavior.
+- TOOL_TIMEOUT is a root-cause attribution, not necessarily a final task failure; fallback can recover a timed-out primary tool call.
+- Enhanced latency is lower because timeout cutoffs and fallback remove several long-tail baseline failures.
 - ToolCallingReliabilityMetric is deterministic and trace-based: it adds timeout, retry, fallback, latency, runtime success, and root-cause attribution signals.
